@@ -6,6 +6,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 from src.services.extractor import process_invoice
+from src.services.validator import validate_invoice_data
 from src.schemas.extraction import ExtractedInvoicePayload, InvoiceUpdate
 from src.models.model import Vendor, Invoice, LineItem, InvoiceStatus
 from src.core.database import get_session
@@ -32,22 +33,7 @@ async def upload_invoice(file: UploadFile = File(...), session: Session = Depend
         # 1. Run AI Extraction (Supports text PDFs and vision models)
         extracted_data = process_invoice(file_path)
         
-        # --- AUTOMATED TRIAGE GATEKEEPER ---
-        math_is_valid = True
-        if extracted_data.subtotal is not None and extracted_data.tax_amount is not None and extracted_data.total_amount is not None:
-            calculated_total = extracted_data.subtotal + extracted_data.tax_amount
-            if abs(calculated_total - extracted_data.total_amount) > 0.05:
-                math_is_valid = False
-                
-        is_high_confidence = extracted_data.overall_confidence >= 0.90
-        
-        if is_high_confidence and math_is_valid:
-            initial_status = InvoiceStatus.VALID
-        else:
-            initial_status = InvoiceStatus.NEEDS_REVIEW
-        # -----------------------------------
-
-        # 2. Find or Create Vendor
+        # 2. Find or Create Vendor first (required for duplicate verification)
         vendor_name = extracted_data.vendor_name
         statement = select(Vendor).where(Vendor.raw_name == vendor_name)
         vendor = session.exec(statement).first()
@@ -57,7 +43,10 @@ async def upload_invoice(file: UploadFile = File(...), session: Session = Depend
             session.add(vendor)
             session.flush()
             
-        # 3. Create Invoice Record with dynamic status assignment
+        # 3. Run Automated Validation & Triage via the Validator Service
+        initial_status, validation_warnings = validate_invoice_data(extracted_data, vendor.id, session)
+
+        # 4. Create Invoice Record with dynamic status assignment
         db_invoice = Invoice(
             vendor_id=vendor.id,
             invoice_number=extracted_data.invoice_number,
@@ -73,7 +62,7 @@ async def upload_invoice(file: UploadFile = File(...), session: Session = Depend
         session.add(db_invoice)
         session.flush()
         
-        # 4. Create Line Items
+        # 5. Create Line Items
         for item in extracted_data.line_items:
             db_line_item = LineItem(
                 invoice_id=db_invoice.id,
@@ -84,14 +73,15 @@ async def upload_invoice(file: UploadFile = File(...), session: Session = Depend
             )
             session.add(db_line_item)
             
-        # 5. Commit everything to the database
+        # 6. Commit everything to the database
         session.commit()
         session.refresh(db_invoice)
         
         return {
             "message": "Invoice processed and triaged successfully", 
             "invoice_id": db_invoice.id,
-            "assigned_status": db_invoice.status
+            "assigned_status": db_invoice.status,
+            "warnings": validation_warnings
         }
         
     except Exception as e:
@@ -100,7 +90,7 @@ async def upload_invoice(file: UploadFile = File(...), session: Session = Depend
 
 @router.get("/")
 def get_all_invoices(
-    status: Optional[InvoiceStatus] = None, # <--- FastAPI renders this as a selectbox dropdown in Swagger UI
+    status: Optional[InvoiceStatus] = None, 
     search: Optional[str] = None,
     session: Session = Depends(get_session)
 ):
