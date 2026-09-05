@@ -12,12 +12,29 @@ def validate_invoice_data(extracted_data: ExtractedInvoicePayload, vendor_id: in
     warnings = []
     
     # 1. Math Discrepancy Check
+    # 1. Financial completeness + math consistency check
     math_is_valid = True
-    if extracted_data.subtotal is not None and extracted_data.tax_amount is not None and extracted_data.total_amount is not None:
+
+    if (
+        extracted_data.subtotal is None
+        or extracted_data.tax_amount is None
+        or extracted_data.total_amount is None
+    ):
+        math_is_valid = False
+        warnings.append(
+            "Missing financial value: subtotal, tax amount, and total amount "
+            "must all be present for automatic validation."
+        )
+    else:
         calculated_total = extracted_data.subtotal + extracted_data.tax_amount
+
         if abs(calculated_total - extracted_data.total_amount) > 0.05:
             math_is_valid = False
-            warnings.append(f"Math mismatch: Subtotal ({extracted_data.subtotal}) + Tax ({extracted_data.tax_amount}) != Total ({extracted_data.total_amount})")
+            warnings.append(
+                f"Math mismatch: Subtotal ({extracted_data.subtotal}) "
+                f"+ Tax ({extracted_data.tax_amount}) "
+                f"!= Total ({extracted_data.total_amount})"
+            )
 
     # 2. Confidence Score Check
     # overall_confidence is a self-reported AI estimate, not a calibrated
@@ -48,3 +65,4 @@ def validate_invoice_data(extracted_data: ExtractedInvoicePayload, vendor_id: in
         return InvoiceStatus.VALID, warnings
     else:
         return InvoiceStatus.NEEDS_REVIEW, warnings
+

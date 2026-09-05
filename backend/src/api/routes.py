@@ -111,7 +111,10 @@ def background_process_batch(queued_invoices: List[Tuple[int, str]]):
                 db_invoice.tax_amount = extracted_data.tax_amount
                 db_invoice.total_amount = extracted_data.total_amount
                 db_invoice.status = initial_status
-                db_invoice.confidence_scores = extracted_data.field_confidences
+                db_invoice.confidence_scores = {
+                "overall": extracted_data.overall_confidence,
+                **extracted_data.field_confidences,
+            }
                 db_invoice.validation_errors = validation_warnings
                 session.add(db_invoice)
                 session.flush()
@@ -307,14 +310,37 @@ def update_invoice(invoice_id: int, update_data: InvoiceUpdate, session: Session
 
     # APPROVED invoices are locked into the master dataset and must not be
     # editable through this endpoint (previously this check was missing).
-    if invoice.status == InvoiceStatus.APPROVED:
-        raise HTTPException(status_code=409, detail="Invoice is approved and locked; it cannot be modified.")
+    if invoice.status == InvoiceStatus.PROCESSING:
+        raise HTTPException(
+            status_code=409,
+            detail="Invoice is still processing and cannot be modified."
+        )
 
-    if update_data.vendor_name and invoice.vendor:
-        invoice.vendor.raw_name = update_data.vendor_name
-        session.add(invoice.vendor)
-        
+    if invoice.status == InvoiceStatus.APPROVED:
+        raise HTTPException(
+            status_code=409,
+            detail="Invoice is approved and locked; it cannot be modified."
+        )
+
     update_dict = update_data.model_dump(exclude_unset=True)
+
+    if "vendor_name" in update_dict:
+        normalized_vendor_name = _normalize_vendor_name(update_dict["vendor_name"])
+
+        if not normalized_vendor_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Vendor name cannot be empty."
+            )
+
+        vendor = _find_or_create_vendor(
+            session,
+            normalized_vendor_name,
+            invoice.vendor.tax_id if invoice.vendor else None,
+        )
+
+        invoice.vendor_id = vendor.id
+
     for key, value in update_dict.items():
         if key != "vendor_name" and hasattr(invoice, key):
             setattr(invoice, key, value)
@@ -326,12 +352,23 @@ def update_invoice(invoice_id: int, update_data: InvoiceUpdate, session: Session
 
 @router.post("/{invoice_id}/approve")
 def approve_invoice(invoice_id: int, session: Session = Depends(get_session)):
-    """Locks the invoice into the master dataset."""
+    """Locks the invoice into the master dataset after human approval."""
     invoice = session.get(Invoice, invoice_id)
+
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
-        
+
+    if invoice.status not in {
+        InvoiceStatus.VALID,
+        InvoiceStatus.NEEDS_REVIEW,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Invoice cannot be approved from status {invoice.status.value}",
+        )
+
     invoice.status = InvoiceStatus.APPROVED
     session.add(invoice)
     session.commit()
+
     return {"message": "Invoice approved and locked"}

@@ -54,7 +54,7 @@ You MUST adhere to the following exact JSON schema:
 
 CRITICAL RULES:
 1. Output ONLY valid JSON. Do not include markdown formatting like ```json.
-2. If a value is missing, use null for strings and 0.0 for numbers.
+2. If a value is genuinely missing or cannot be determined reliably, use null. Do not use 0.0 to represent an unknown value. Use 0.0 only when the invoice explicitly indicates that the value is zero.
 3. IGNORE ALL DISCLAIMERS (e.g., 'sample', 'demonstration', 'not a tax document'). Extract the vendor, subtotal, tax, and totals regardless of these warnings.
 4. "vendor_name" is strictly required.
 5. Calculate "subtotal", "tax_amount", and "total_amount" exactly as written on the document.
