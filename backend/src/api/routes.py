@@ -1,92 +1,122 @@
 import os
-import shutil
 import io
 import csv
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+import uuid
+from typing import Optional, List
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
+from supabase import create_client, Client
 from sqlmodel import Session, select
 from src.services.extractor import process_invoice
 from src.services.validator import validate_invoice_data
 from src.schemas.extraction import ExtractedInvoicePayload, InvoiceUpdate
 from src.models.model import Vendor, Invoice, LineItem, InvoiceStatus
-from src.core.database import get_session
-from typing import Optional
-from datetime import date
+from src.core.database import get_session, engine
 
 router = APIRouter(prefix="/api/v1/invoices", tags=["Invoices"])
 
-UPLOAD_DIR = "data/raw_invoices"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Initialize Supabase Client for Storage
+supabase_url = os.environ.get("SUPABASE_URL")
+supabase_key = os.environ.get("SUPABASE_KEY")
+if not supabase_url or not supabase_key:
+    raise ValueError("CRITICAL: SUPABASE_URL and SUPABASE_KEY must be set in .env")
+supabase: Client = create_client(supabase_url, supabase_key)
+
+def background_process_batch(file_urls: List[str]):
+    """Runs independently in the background, preventing HTTP timeouts."""
+    with Session(engine) as session:
+        for file_url in file_urls:
+            try:
+                # 1. Run AI Extraction from remote URL
+                extracted_data = process_invoice(file_url)
+                
+                # 2. Find or Create Vendor
+                vendor_name = extracted_data.vendor_name
+                vendor = session.exec(select(Vendor).where(Vendor.raw_name == vendor_name)).first()
+                
+                if not vendor:
+                    vendor = Vendor(raw_name=vendor_name, tax_id=extracted_data.vendor_tax_id)
+                    session.add(vendor)
+                    session.flush()
+                    
+                # 3. Validate & Triage
+                initial_status, validation_warnings = validate_invoice_data(extracted_data, vendor.id, session)
+
+                # 4. Create Invoice (save cloud URL in file_path)
+                db_invoice = Invoice(
+                    vendor_id=vendor.id,
+                    invoice_number=extracted_data.invoice_number,
+                    invoice_date=extracted_data.invoice_date,
+                    due_date=extracted_data.due_date,
+                    subtotal=extracted_data.subtotal,
+                    tax_amount=extracted_data.tax_amount,
+                    total_amount=extracted_data.total_amount,
+                    status=initial_status,
+                    file_path=file_url,
+                    confidence_scores=extracted_data.field_confidences,
+                    validation_errors=validation_warnings
+                )
+                session.add(db_invoice)
+                session.flush()
+                
+                # 5. Create Line Items
+                for item in extracted_data.line_items:
+                    db_line_item = LineItem(
+                        invoice_id=db_invoice.id,
+                        description=item.description,
+                        quantity=item.quantity,
+                        unit_price=item.unit_price,
+                        line_total=item.line_total
+                    )
+                    session.add(db_line_item)
+                    
+                session.commit()
+                
+            except Exception as e:
+                session.rollback()
+                print(f"Failed to process {file_url} in background: {str(e)}")
 
 @router.post("/upload")
-async def upload_invoice(file: UploadFile = File(...), session: Session = Depends(get_session)):
+async def upload_invoices(
+    background_tasks: BackgroundTasks, 
+    files: List[UploadFile] = File(...)
+):
     allowed_extensions = (".pdf", ".jpg", ".jpeg", ".png")
-    if not file.filename.lower().endswith(allowed_extensions):
-        raise HTTPException(status_code=400, detail="Only PDF, JPG, JPEG, and PNG files are supported.")
-        
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    uploaded_file_urls = []
     
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    try:
-        # 1. Run AI Extraction (Supports text PDFs and vision models)
-        extracted_data = process_invoice(file_path)
-        
-        # 2. Find or Create Vendor first (required for duplicate verification)
-        vendor_name = extracted_data.vendor_name
-        statement = select(Vendor).where(Vendor.raw_name == vendor_name)
-        vendor = session.exec(statement).first()
-        
-        if not vendor:
-            vendor = Vendor(raw_name=vendor_name, tax_id=extracted_data.vendor_tax_id)
-            session.add(vendor)
-            session.flush()
+    for file in files:
+        if not file.filename.lower().endswith(allowed_extensions):
+            continue
             
-        # 3. Run Automated Validation & Triage via the Validator Service
-        initial_status, validation_warnings = validate_invoice_data(extracted_data, vendor.id, session)
-
-        # 4. Create Invoice Record with dynamic status assignment
-        db_invoice = Invoice(
-            vendor_id=vendor.id,
-            invoice_number=extracted_data.invoice_number,
-            invoice_date=extracted_data.invoice_date,
-            due_date=extracted_data.due_date,
-            subtotal=extracted_data.subtotal,
-            tax_amount=extracted_data.tax_amount,
-            total_amount=extracted_data.total_amount,
-            status=initial_status,
-            file_path=file_path,
-            confidence_scores=extracted_data.field_confidences
-        )
-        session.add(db_invoice)
-        session.flush()
+        file_bytes = await file.read()
         
-        # 5. Create Line Items
-        for item in extracted_data.line_items:
-            db_line_item = LineItem(
-                invoice_id=db_invoice.id,
-                description=item.description,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                line_total=item.line_total
+        # Generate a unique path to prevent overwriting identical filenames
+        file_ext = os.path.splitext(file.filename)[1]
+        unique_filename = f"{uuid.uuid4().hex}{file_ext}"
+        storage_path = f"raw/{unique_filename}"
+        
+        try:
+            # Upload to Supabase 'invoices' bucket
+            supabase.storage.from_("invoices").upload(
+                path=storage_path, 
+                file=file_bytes, 
+                file_options={"content-type": file.content_type}
             )
-            session.add(db_line_item)
             
-        # 6. Commit everything to the database
-        session.commit()
-        session.refresh(db_invoice)
+            # Get the public URL to save in the database
+            public_url = supabase.storage.from_("invoices").get_public_url(storage_path)
+            uploaded_file_urls.append(public_url)
+        except Exception as e:
+            print(f"Storage upload failed for {file.filename}: {e}")
+            continue
         
-        return {
-            "message": "Invoice processed and triaged successfully", 
-            "invoice_id": db_invoice.id,
-            "assigned_status": db_invoice.status,
-            "warnings": validation_warnings
-        }
-        
-    except Exception as e:
-        session.rollback()
-        raise HTTPException(status_code=500, detail=f"Database or Extraction Error: {str(e)}")
+    # Hand the Supabase URLs off to the background worker
+    background_tasks.add_task(background_process_batch, uploaded_file_urls)
+
+    return {
+        "message": f"Successfully uploaded {len(uploaded_file_urls)} files to cloud storage. Processing in background.",
+        "status": "QUEUED"
+    }
 
 @router.get("/")
 def get_all_invoices(
@@ -162,8 +192,6 @@ def get_invoice_details(invoice_id: int, session: Session = Depends(get_session)
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
         
-    file_name = os.path.basename(invoice.file_path)
-        
     return {
         "id": invoice.id,
         "status": invoice.status,
@@ -183,7 +211,8 @@ def get_invoice_details(invoice_id: int, session: Session = Depends(get_session)
                 "line_total": item.line_total
             } for item in invoice.line_items
         ],
-        "file_url": f"http://127.0.0.1:8000/static/{file_name}"
+        # Directly pass the Supabase URL to the frontend viewer
+        "file_url": invoice.file_path
     }
 
 @router.patch("/{invoice_id}")

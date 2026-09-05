@@ -2,6 +2,7 @@ import pymupdf
 import json
 import os
 import base64
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from src.schemas.extraction import ExtractedInvoicePayload
@@ -19,19 +20,29 @@ client = OpenAI(
     api_key=api_key
 )
 
-def extract_text_from_pdf(file_path: str) -> str:
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     try:
-        doc = pymupdf.open(file_path)
+        # PyMuPDF natively supports reading directly from memory buffers
+        doc = pymupdf.open("pdf", pdf_bytes)
         return "\n".join(page.get_text("text") for page in doc)
     except Exception as e:
-        raise ValueError(f"Failed to read PDF: {str(e)}")
+        raise ValueError(f"Failed to read PDF stream: {str(e)}")
 
-def encode_image_to_base64(file_path: str) -> str:
-    with open(file_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode("utf-8")
+def encode_image_bytes_to_base64(image_bytes: bytes) -> str:
+    return base64.b64encode(image_bytes).decode("utf-8")
 
-def process_invoice(file_path: str) -> ExtractedInvoicePayload:
-    file_extension = os.path.splitext(file_path)[1].lower()
+def process_invoice(file_url: str) -> ExtractedInvoicePayload:
+    # 1. Fetch file from Supabase URL into memory
+    try:
+        response = requests.get(file_url)
+        response.raise_for_status()
+        file_bytes = response.content
+    except Exception as e:
+        raise ValueError(f"Failed to download file from {file_url}: {str(e)}")
+
+    # Clean the URL to extract the true file extension (ignoring query parameters)
+    clean_url = file_url.split("?")[0]
+    file_extension = os.path.splitext(clean_url)[1].lower()
     
     schema_definition = json.dumps(ExtractedInvoicePayload.model_json_schema(), indent=2)
     
@@ -51,10 +62,10 @@ CRITICAL RULES:
 
     # --- PATH A: HANDLE IMAGES (JPG, PNG, JPEG) VIA VISION MODEL ---
     if file_extension in [".jpg", ".jpeg", ".png"]:
-        base64_image = encode_image_to_base64(file_path)
+        base64_image = encode_image_bytes_to_base64(file_bytes)
         
         response = client.chat.completions.create(
-            model="qwen/qwen3.6-27b", # Groq's native multimodal vision model supporting JSON mode
+            model="qwen/qwen3.6-27b",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -76,10 +87,10 @@ CRITICAL RULES:
         
     # --- PATH B: HANDLE PDFs VIA TEXT EXTRACTION ---
     else:
-        raw_text = extract_text_from_pdf(file_path)
+        raw_text = extract_text_from_pdf_bytes(file_bytes)
         
         if not raw_text.strip():
-            raise ValueError(f"No digital text found in {file_path}. Please upload a text PDF or a clear image (JPG/PNG).")
+            raise ValueError("No digital text found. Please upload a text PDF or a clear image (JPG/PNG).")
             
         response = client.chat.completions.create(
             model="openai/gpt-oss-20b", 
@@ -91,11 +102,5 @@ CRITICAL RULES:
             temperature=0.0 
         )
     
-    # Parse and validate the response
     raw_json = response.choices[0].message.content
     return ExtractedInvoicePayload.model_validate_json(raw_json)
-
-
-if __name__ == "__main__":
-    result = process_invoice("sample.pdf")
-    print(result.model_dump_json(indent=2))
