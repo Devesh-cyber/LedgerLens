@@ -34,7 +34,7 @@ def encode_image_bytes_to_base64(image_bytes: bytes) -> str:
 def process_invoice(file_url: str) -> ExtractedInvoicePayload:
     # 1. Fetch file from Supabase URL into memory
     try:
-        response = requests.get(file_url)
+        response = requests.get(file_url, timeout=30)
         response.raise_for_status()
         file_bytes = response.content
     except Exception as e:
@@ -58,12 +58,19 @@ CRITICAL RULES:
 3. IGNORE ALL DISCLAIMERS (e.g., 'sample', 'demonstration', 'not a tax document'). Extract the vendor, subtotal, tax, and totals regardless of these warnings.
 4. "vendor_name" is strictly required.
 5. Calculate "subtotal", "tax_amount", and "total_amount" exactly as written on the document.
+6. Set "overall_confidence" to your own honest self-assessment (0.0-1.0) of how certain you are about the extracted values, based on document legibility and ambiguity. Use 0.95+ only when every field is clearly printed and unambiguous. Lower it whenever text is blurry, handwritten, cut off, or you had to guess/infer a value. This is a self-reported estimate, not a statistical guarantee.
 """
 
     # --- PATH A: HANDLE IMAGES (JPG, PNG, JPEG) VIA VISION MODEL ---
     if file_extension in [".jpg", ".jpeg", ".png"]:
         base64_image = encode_image_bytes_to_base64(file_bytes)
-        
+
+        # Use the correct MIME type for the actual file extension instead of
+        # hardcoding image/jpeg (was previously mislabeling PNGs, which some
+        # vision models reject or misread).
+        image_mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+        image_mime_type = image_mime_map[file_extension]
+
         response = client.chat.completions.create(
             model="qwen/qwen3.6-27b",
             messages=[
@@ -75,7 +82,7 @@ CRITICAL RULES:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
+                                "url": f"data:{image_mime_type};base64,{base64_image}"
                             }
                         }
                     ]

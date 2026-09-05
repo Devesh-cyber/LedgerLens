@@ -22,7 +22,10 @@ class ExtractedInvoicePayload(BaseModel):
     spending_category: Optional[str] = Field(default="General Expense")
     line_items: List[ExtractedLineItem] = Field(default=[])
     
-    overall_confidence: float = Field(default=0.90)
+    # No default: if the model doesn't return a confidence value, we want to
+    # know that explicitly (treated as "unknown" -> routed to review) rather
+    # than silently assuming a fixed 0.90 "confidence" that isn't real.
+    overall_confidence: Optional[float] = Field(default=None)
     field_confidences: Dict[str, float] = Field(default_factory=dict)
 
 class InvoiceUpdate(BaseModel):

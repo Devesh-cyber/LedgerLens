@@ -20,9 +20,16 @@ def validate_invoice_data(extracted_data: ExtractedInvoicePayload, vendor_id: in
             warnings.append(f"Math mismatch: Subtotal ({extracted_data.subtotal}) + Tax ({extracted_data.tax_amount}) != Total ({extracted_data.total_amount})")
 
     # 2. Confidence Score Check
-    is_high_confidence = extracted_data.overall_confidence >= 0.90
-    if not is_high_confidence:
-        warnings.append(f"Low confidence score: {extracted_data.overall_confidence}")
+    # overall_confidence is a self-reported AI estimate, not a calibrated
+    # statistical probability. If the model didn't return one at all, don't
+    # assume it was high confidence -- treat it as needing human review.
+    if extracted_data.overall_confidence is None:
+        is_high_confidence = False
+        warnings.append("AI did not report a confidence score for this extraction; flagged for review.")
+    else:
+        is_high_confidence = extracted_data.overall_confidence >= 0.90
+        if not is_high_confidence:
+            warnings.append(f"Low self-reported AI confidence: {extracted_data.overall_confidence}")
 
     # 3. Duplicate Invoice Check
     if extracted_data.invoice_number:
