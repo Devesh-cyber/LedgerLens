@@ -1,0 +1,51 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://marketplace.visualstudio.com/items?itemName=pomdtr.excalidraw-editor",
+  "elements": [
+    {
+      "id": "NhmNfKw0IrELn-RyFGezw",
+      "type": "text",
+      "x": 203,
+      "y": 112,
+      "width": 608.626953125,
+      "height": 900,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a0",
+      "roundness": null,
+      "seed": 732662174,
+      "version": 74,
+      "versionNonce": 1220035650,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1788691621548,
+      "link": null,
+      "locked": false,
+      "text": "                    LedgerLens Backend\n                           │\n             ┌─────────────┴─────────────┐\n             │                           │\n          INGESTION                  PROCESSING\n             │                           │\n        Upload files              AI extraction\n        PDF/JPG/PNG                    │\n             │                         ↓\n       Supabase Storage         Structured payload\n             │                         │\n             └────────────┬────────────┘\n                          ↓\n                     VALIDATION\n                          │\n       ┌──────────────────┼──────────────────┐\n       ↓                  ↓                  ↓\n Critical fields     Financial math      Line-item math\n       │                  │                  │\n       └──────────────────┼──────────────────┘\n                          ↓\n                  Duplicate detection\n                          │\n                          ↓\n                 VALID / NEEDS_REVIEW\n                          │\n                 ┌────────┴────────┐\n                 ↓                 ↓\n              Review            Valid\n                 │                 │\n              PATCH              Approve\n                 │                 │\n          Re-validation           ↓\n                 │             APPROVED 🔒\n                 ↓\n          VALID / REVIEW",
+      "fontSize": 20,
+      "fontFamily": 5,
+      "textAlign": "left",
+      "verticalAlign": "top",
+      "containerId": null,
+      "originalText": "                    LedgerLens Backend\n                           │\n             ┌─────────────┴─────────────┐\n             │                           │\n          INGESTION                  PROCESSING\n             │                           │\n        Upload files              AI extraction\n        PDF/JPG/PNG                    │\n             │                         ↓\n       Supabase Storage         Structured payload\n             │                         │\n             └────────────┬────────────┘\n                          ↓\n                     VALIDATION\n                          │\n       ┌──────────────────┼──────────────────┐\n       ↓                  ↓                  ↓\n Critical fields     Financial math      Line-item math\n       │                  │                  │\n       └──────────────────┼──────────────────┘\n                          ↓\n                  Duplicate detection\n                          │\n                          ↓\n                 VALID / NEEDS_REVIEW\n                          │\n                 ┌────────┴────────┐\n                 ↓                 ↓\n              Review            Valid\n                 │                 │\n              PATCH              Approve\n                 │                 │\n          Re-validation           ↓\n                 │             APPROVED 🔒\n                 ↓\n          VALID / REVIEW",
+      "autoResize": true,
+      "lineHeight": 1.25
+    }
+  ],
+  "appState": {
+    "gridSize": 20,
+    "gridStep": 5,
+    "gridModeEnabled": false,
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}
