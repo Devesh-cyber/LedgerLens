@@ -57,8 +57,10 @@ CRITICAL RULES:
 2. If a value is genuinely missing or cannot be determined reliably, use null. Do not use 0.0 to represent an unknown value. Use 0.0 only when the invoice explicitly indicates that the value is zero.
 3. IGNORE ALL DISCLAIMERS (e.g., 'sample', 'demonstration', 'not a tax document'). Extract the vendor, subtotal, tax, and totals regardless of these warnings.
 4. "vendor_name" is strictly required.
-5. Calculate "subtotal", "tax_amount", and "total_amount" exactly as written on the document.
-6. Set "overall_confidence" to your own honest self-assessment (0.0-1.0) of how certain you are about the extracted values, based on document legibility and ambiguity. Use 0.95+ only when every field is clearly printed and unambiguous. Lower it whenever text is blurry, handwritten, cut off, or you had to guess/infer a value. This is a self-reported estimate, not a statistical guarantee.
+5. "invoice_number" must be extracted whenever the document contains a field explicitly labeled "Invoice Number", "Invoice No", "Invoice #", or an equivalent label. Do not leave invoice_number null when such a labeled value is clearly present.
+6. Calculate "subtotal", "tax_amount", and "total_amount" exactly as written on the document.
+7. Do not confuse invoice_number with booking ID, transaction ID, payment reference, customer ID, GSTIN, or other reference numbers. Prefer the value directly associated with the invoice-number label.
+8. If multiple reference numbers appear, use the one explicitly identified as the invoice number.
 """
 
     # --- PATH A: HANDLE IMAGES (JPG, PNG, JPEG) VIA VISION MODEL ---

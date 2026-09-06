@@ -10,8 +10,11 @@ from supabase import create_client, Client
 from sqlmodel import Session, select
 from sqlalchemy import func
 from src.services.extractor import process_invoice
-from src.services.validator import validate_invoice_data
-from src.schemas.extraction import ExtractedInvoicePayload, InvoiceUpdate
+from src.services.validator import (
+    validate_invoice_data,
+    validate_saved_invoice,
+)
+from src.schemas.extraction import LineItemUpdate, InvoiceUpdate
 from src.models.model import Vendor, Invoice, LineItem, InvoiceStatus
 from src.core.database import get_session, engine
 
@@ -77,6 +80,31 @@ def _mark_invoice_failed(invoice_id: int, error_message: str) -> None:
             session.rollback()
             logger.exception("Failed to persist failure state for invoice %s", invoice_id)
 
+def get_missing_critical_fields(invoice: Invoice) -> list[str]:
+    """Return critical fields that are missing and require human review."""
+    critical_fields = {
+        "vendor_name",
+        "invoice_number",
+        "invoice_date",
+        "total_amount",
+    }
+
+    field_values = {
+        "vendor_name": invoice.vendor.raw_name if invoice.vendor else None,
+        "invoice_number": invoice.invoice_number,
+        "invoice_date": invoice.invoice_date,
+        "total_amount": invoice.total_amount,
+    }
+
+    return [
+        field_name
+        for field_name in critical_fields
+        if field_values[field_name] is None
+        or (
+            isinstance(field_values[field_name], str)
+            and not field_values[field_name].strip()
+        )
+    ]
 
 def background_process_batch(queued_invoices: List[Tuple[int, str]]):
     """Runs independently in the background, preventing HTTP timeouts.
@@ -275,7 +303,9 @@ def get_invoice_details(invoice_id: int, session: Session = Depends(get_session)
     
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
-        
+
+    review_fields = get_missing_critical_fields(invoice)
+
     return {
         "id": invoice.id,
         "status": invoice.status,
@@ -288,6 +318,7 @@ def get_invoice_details(invoice_id: int, session: Session = Depends(get_session)
         "tax_amount": invoice.tax_amount,
         "total_amount": invoice.total_amount,
         "validation_errors": invoice.validation_errors,
+        "review_fields": review_fields,
         "confidence_scores": invoice.confidence_scores,
         "line_items": [
             {
@@ -302,35 +333,48 @@ def get_invoice_details(invoice_id: int, session: Session = Depends(get_session)
     }
 
 @router.patch("/{invoice_id}")
-def update_invoice(invoice_id: int, update_data: InvoiceUpdate, session: Session = Depends(get_session)):
-    """Saves human corrections from the Side-by-Side UI."""
-    invoice = session.get(Invoice, invoice_id)
-    if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+def update_invoice(
+    invoice_id: int,
+    update_data: InvoiceUpdate,
+    session: Session = Depends(get_session),
+):
+    """Saves human corrections and re-validates the invoice."""
 
-    # APPROVED invoices are locked into the master dataset and must not be
-    # editable through this endpoint (previously this check was missing).
+    invoice = session.get(Invoice, invoice_id)
+
+    if not invoice:
+        raise HTTPException(
+            status_code=404,
+            detail="Invoice not found",
+        )
+
+    # PROCESSING invoices cannot be edited because extraction is
+    # still in progress.
     if invoice.status == InvoiceStatus.PROCESSING:
         raise HTTPException(
             status_code=409,
-            detail="Invoice is still processing and cannot be modified."
+            detail="Invoice is still processing and cannot be modified.",
         )
 
+    # APPROVED invoices are locked permanently.
     if invoice.status == InvoiceStatus.APPROVED:
         raise HTTPException(
             status_code=409,
-            detail="Invoice is approved and locked; it cannot be modified."
+            detail="Invoice is approved and locked; it cannot be modified.",
         )
 
     update_dict = update_data.model_dump(exclude_unset=True)
 
+    # Human correction of vendor name.
     if "vendor_name" in update_dict:
-        normalized_vendor_name = _normalize_vendor_name(update_dict["vendor_name"])
+        normalized_vendor_name = _normalize_vendor_name(
+            update_dict["vendor_name"]
+        )
 
         if not normalized_vendor_name:
             raise HTTPException(
                 status_code=400,
-                detail="Vendor name cannot be empty."
+                detail="Vendor name cannot be empty.",
             )
 
         vendor = _find_or_create_vendor(
@@ -341,14 +385,59 @@ def update_invoice(invoice_id: int, update_data: InvoiceUpdate, session: Session
 
         invoice.vendor_id = vendor.id
 
+        # Apply scalar invoice corrections.
     for key, value in update_dict.items():
-        if key != "vendor_name" and hasattr(invoice, key):
+        if key in {"vendor_name", "line_items"}:
+            continue
+
+        if hasattr(invoice, key):
             setattr(invoice, key, value)
-            
+
+    # Replace line items when human corrections are supplied.
+    if "line_items" in update_dict:
+        invoice.line_items.clear()
+
+        for line_item_data in update_data.line_items or []:
+            line_item = LineItem(
+                invoice_id=invoice.id,
+                description=line_item_data.description or "",
+                quantity=(
+                    line_item_data.quantity
+                    if line_item_data.quantity is not None
+                    else 1.0
+                ),
+                unit_price=(
+                    line_item_data.unit_price
+                    if line_item_data.unit_price is not None
+                    else 0.0
+                ),
+                line_total=(
+                    line_item_data.line_total
+                    if line_item_data.line_total is not None
+                    else 0.0
+                ),
+            )
+
+            invoice.line_items.append(line_item)
+
+    # Re-validate the corrected persisted invoice.
+    new_status, validation_errors = validate_saved_invoice(
+        invoice,
+        session,
+    )
+
+    invoice.status = new_status
+    invoice.validation_errors = validation_errors
+
     session.add(invoice)
     session.commit()
     session.refresh(invoice)
-    return {"message": "Corrections saved successfully"}
+
+    return {
+        "message": "Corrections saved successfully",
+        "status": invoice.status,
+        "validation_errors": invoice.validation_errors,
+    }
 
 @router.post("/{invoice_id}/approve")
 def approve_invoice(invoice_id: int, session: Session = Depends(get_session)):

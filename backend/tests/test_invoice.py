@@ -15,6 +15,9 @@ Minimal regression tests for the fixes made during this audit:
 11. Duplicate invoice numbers route the invoice to review.
 12. Confidence scores must be between 0 and 1.
 13. Overall confidence is persisted with field confidences.
+14. Missing critical fields route the invoice to review.
+15. review_fields identifies missing critical fields.
+16. Multiple missing critical fields are all identified.
 
 These deliberately mock Supabase Storage and the LLM extraction call
 so the suite runs offline and never touches the real project.
@@ -245,6 +248,67 @@ def test_missing_financial_value_routes_to_review(client):
     )
 
 
+def test_review_fields_identify_missing_critical_fields(client):
+    missing_invoice_number = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": None,
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=missing_invoice_number,
+    ):
+        r = _upload(
+            client,
+            filename="missing-invoice-number.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    details = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert details["status"] == "NEEDS_REVIEW"
+    assert details["review_fields"] == ["invoice_number"]
+
+
+def test_multiple_missing_critical_fields_are_identified(client):
+    missing_fields = FAKE_EXTRACTION.model_copy(
+        update={
+            "vendor_name": "",
+            "invoice_number": None,
+            "invoice_date": None,
+            "total_amount": None,
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=missing_fields,
+    ):
+        r = _upload(
+            client,
+            filename="multiple-missing-fields.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    details = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert details["status"] == "NEEDS_REVIEW"
+
+    assert set(details["review_fields"]) == {
+        "vendor_name",
+        "invoice_number",
+        "invoice_date",
+        "total_amount",
+    }
+
+
 def test_vendor_correction_does_not_modify_shared_vendor(client):
     first_invoice = FAKE_EXTRACTION.model_copy(
         update={
@@ -452,3 +516,322 @@ def test_overall_confidence_is_persisted(client):
 
     assert details["confidence_scores"]["overall"] == 0.97
     assert details["confidence_scores"]["vendor_name"] == 0.99
+
+
+def test_missing_critical_field_routes_to_review(client):
+    missing_invoice_number = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": None,
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=missing_invoice_number,
+    ):
+        r = _upload(
+            client,
+            filename="missing-invoice-number.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    details = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert details["status"] == "NEEDS_REVIEW"
+
+    assert any(
+        "Missing critical field: invoice_number" in msg
+        for msg in details["validation_errors"]
+    )
+
+def test_review_invoice_can_be_corrected_and_revalidated(client):
+    invalid_invoice = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": None,
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=invalid_invoice,
+    ):
+        r = _upload(
+            client,
+            filename="needs-review.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    before = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert before["status"] == "NEEDS_REVIEW"
+    assert before["review_fields"] == ["invoice_number"]
+
+    correction = client.patch(
+        f"/api/v1/invoices/{invoice_id}",
+        json={
+            "invoice_number": "INV-CORRECTED-001",
+        },
+    )
+
+    assert correction.status_code == 200
+
+    after = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert after["invoice_number"] == "INV-CORRECTED-001"
+    assert after["status"] == "VALID"
+    assert after["validation_errors"] == []
+    assert after["review_fields"] == []
+
+
+def test_invalid_correction_remains_needs_review(client):
+    invalid_invoice = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": None,
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=invalid_invoice,
+    ):
+        r = _upload(
+            client,
+            filename="invalid-correction.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    correction = client.patch(
+        f"/api/v1/invoices/{invoice_id}",
+        json={
+            "invoice_number": "INV-CORRECTED-002",
+            "total_amount": 120.0,
+        },
+    )
+
+    assert correction.status_code == 200
+
+    details = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert details["status"] == "NEEDS_REVIEW"
+
+    assert any(
+        "Math mismatch" in msg
+        for msg in details["validation_errors"]
+    )
+
+
+def test_corrected_invoice_can_be_approved(client):
+    invalid_invoice = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": None,
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=invalid_invoice,
+    ):
+        r = _upload(
+            client,
+            filename="correct-and-approve.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    assert client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()["status"] == "NEEDS_REVIEW"
+
+    correction = client.patch(
+        f"/api/v1/invoices/{invoice_id}",
+        json={
+            "invoice_number": "INV-APPROVED-001",
+        },
+    )
+
+    assert correction.status_code == 200
+    assert correction.json()["status"] == "VALID"
+
+    approve = client.post(
+        f"/api/v1/invoices/{invoice_id}/approve"
+    )
+
+    assert approve.status_code == 200
+
+    final_details = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert final_details["status"] == "APPROVED"
+
+def test_line_item_math_mismatch_routes_to_review(client):
+    invalid_line_item = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": "INV-LINE-MISMATCH",
+            "line_items": [
+                ExtractedLineItem(
+                    description="Widget",
+                    quantity=2,
+                    unit_price=50.0,
+                    line_total=120.0,
+                )
+            ],
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=invalid_line_item,
+    ):
+        r = _upload(
+            client,
+            filename="line-item-mismatch.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    details = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert details["status"] == "NEEDS_REVIEW"
+
+    assert any(
+        "Line item 1 math mismatch" in msg
+        for msg in details["validation_errors"]
+    )
+
+def test_line_item_can_be_corrected_and_revalidated(client):
+    invalid_line_item = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": "INV-LINE-CORRECTION",
+            "line_items": [
+                ExtractedLineItem(
+                    description="Widget",
+                    quantity=2,
+                    unit_price=50.0,
+                    line_total=120.0,
+                )
+            ],
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=invalid_line_item,
+    ):
+        r = _upload(
+            client,
+            filename="line-item-correction.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    before = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert before["status"] == "NEEDS_REVIEW"
+
+    correction = client.patch(
+        f"/api/v1/invoices/{invoice_id}",
+        json={
+            "line_items": [
+                {
+                    "description": "Widget",
+                    "quantity": 2,
+                    "unit_price": 50.0,
+                    "line_total": 100.0,
+                }
+            ]
+        },
+    )
+
+    assert correction.status_code == 200
+    assert correction.json()["status"] == "VALID"
+
+    after = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert after["status"] == "VALID"
+    assert after["validation_errors"] == []
+    assert after["review_fields"] == []
+
+    assert len(after["line_items"]) == 1
+    assert after["line_items"][0]["description"] == "Widget"
+    assert after["line_items"][0]["quantity"] == 2
+    assert after["line_items"][0]["unit_price"] == 50.0
+    assert after["line_items"][0]["line_total"] == 100.0
+
+
+def test_invalid_line_item_correction_remains_needs_review(client):
+    invalid_line_item = FAKE_EXTRACTION.model_copy(
+        update={
+            "invoice_number": "INV-LINE-INVALID-CORRECTION",
+            "line_items": [
+                ExtractedLineItem(
+                    description="Widget",
+                    quantity=2,
+                    unit_price=50.0,
+                    line_total=120.0,
+                )
+            ],
+        }
+    )
+
+    with patch(
+        "src.api.routes.process_invoice",
+        return_value=invalid_line_item,
+    ):
+        r = _upload(
+            client,
+            filename="invalid-line-item-correction.pdf",
+        )
+
+    invoice_id = r.json()["queued_invoice_ids"][0]
+
+    before = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert before["status"] == "NEEDS_REVIEW"
+
+    correction = client.patch(
+        f"/api/v1/invoices/{invoice_id}",
+        json={
+            "line_items": [
+                {
+                    "description": "Widget",
+                    "quantity": 2,
+                    "unit_price": 50.0,
+                    "line_total": 125.0,
+                }
+            ]
+        },
+    )
+
+    assert correction.status_code == 200
+    assert correction.json()["status"] == "NEEDS_REVIEW"
+
+    after = client.get(
+        f"/api/v1/invoices/{invoice_id}"
+    ).json()
+
+    assert after["status"] == "NEEDS_REVIEW"
+
+    assert any(
+        "Line item 1 math mismatch" in msg
+        for msg in after["validation_errors"]
+    )

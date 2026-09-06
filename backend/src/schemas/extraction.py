@@ -28,6 +28,13 @@ class ExtractedInvoicePayload(BaseModel):
     overall_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     field_confidences: Dict[str, float] = Field(default_factory=dict)
 
+class LineItemUpdate(BaseModel):
+    description: Optional[str] = None
+    quantity: Optional[float] = None
+    unit_price: Optional[float] = None
+    line_total: Optional[float] = None
+
+    
 class InvoiceUpdate(BaseModel):
     vendor_name: Optional[str] = None
     invoice_number: Optional[str] = None
@@ -35,3 +42,6 @@ class InvoiceUpdate(BaseModel):
     subtotal: Optional[float] = None
     tax_amount: Optional[float] = None
     total_amount: Optional[float] = None
+    line_items: Optional[List[LineItemUpdate]] = None
+
+
